@@ -182,11 +182,27 @@ impl Uploads {
         bucket: String,
         prefix: String,
         amount: usize,
+    ) -> Result<Self, aws_sdk_s3::Error> {
+        let mut uploads = Vec::with_capacity(amount);
+        for index in 0..amount {
+            let upload =
+                Upload::new(client.clone(), bucket.clone(), format!("{prefix}{index}")).await?;
+            uploads.push(Mutex::new(upload));
+        }
+
+        Ok(Self { uploads })
+    }
+
+    pub async fn new_with_size(
+        client: Arc<Client>,
+        bucket: String,
+        prefix: String,
+        amount: usize,
         size_per_upload: usize,
     ) -> Result<Self, aws_sdk_s3::Error> {
         let mut uploads = Vec::with_capacity(amount);
         for index in 0..amount {
-            let upload = Upload::new(
+            let upload = Upload::new_with_size(
                 client.clone(),
                 bucket.clone(),
                 format!("{prefix}{index}"),
