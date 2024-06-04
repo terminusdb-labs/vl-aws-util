@@ -10,12 +10,8 @@ use tokio::sync::Mutex;
 
 pub struct Upload {
     client: Arc<Client>,
-    bucket: String,
-    key: String,
+    pub info: UploadInfo,
     data: BytesMut,
-    upload_id: String,
-    size_per_upload: usize,
-    parts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,6 +26,19 @@ pub struct UploadInfo {
 }
 
 impl Upload {
+    pub async fn upload_from_info(
+        client: Arc<Client>,
+        info: UploadInfo,
+    ) -> Result<Upload, aws_sdk_s3::Error> {
+        let upload = Upload {
+            client: client.clone(),
+            data: BytesMut::new(),
+            info,
+        };
+
+        Ok(upload)
+    }
+
     pub async fn new(
         client: Arc<Client>,
         bucket: String,
@@ -44,12 +53,15 @@ impl Upload {
             .await?;
         let upload = Upload {
             client: client.clone(),
-            bucket,
-            key,
             data: BytesMut::new(),
-            upload_id: upload.upload_id.unwrap(),
-            parts: Vec::new(),
-            size_per_upload: SIZE_PER_UPLOAD,
+            info: UploadInfo {
+                bucket,
+                key,
+                upload_id: upload.upload_id.unwrap(),
+                parts: Vec::new(),
+                size_per_upload: SIZE_PER_UPLOAD,
+                uploaded_bytes: 0,
+            },
         };
 
         Ok(upload)
@@ -69,12 +81,15 @@ impl Upload {
             .await?;
         let upload = Upload {
             client: client.clone(),
-            bucket,
-            key,
             data: BytesMut::new(),
-            upload_id: upload.upload_id.unwrap(),
-            parts: Vec::new(),
-            size_per_upload,
+            info: UploadInfo {
+                bucket,
+                key,
+                upload_id: upload.upload_id.unwrap(),
+                parts: Vec::new(),
+                size_per_upload,
+                uploaded_bytes: 0,
+            },
         };
 
         Ok(upload)
@@ -82,26 +97,26 @@ impl Upload {
 
     pub async fn send(&mut self, data: Bytes) -> Result<(), aws_sdk_s3::Error> {
         self.data.extend(data);
-        while self.data.len() >= self.size_per_upload {
-            let part_num = (self.parts.len() + 1) as i32;
+        while self.data.len() >= self.info.size_per_upload {
+            let part_num = (self.info.parts.len() + 1) as i32;
             eprintln!(
                 "uploading {} bytes to {} (part {})",
-                self.size_per_upload, self.key, part_num
+                self.info.size_per_upload, self.info.key, part_num
             );
-            let to_send = self.data.split_to(self.size_per_upload);
+            let to_send = self.data.split_to(self.info.size_per_upload);
             let part_upload = self
                 .client
                 .upload_part()
-                .bucket(&self.bucket)
-                .key(&self.key)
-                .upload_id(&self.upload_id)
+                .bucket(&self.info.bucket)
+                .key(&self.info.key)
+                .upload_id(&self.info.upload_id)
                 .part_number(part_num)
                 .body(to_send.freeze().into())
                 .send()
                 .await?;
 
             let e_tag = part_upload.e_tag.unwrap();
-            self.parts.push(e_tag);
+            self.info.parts.push(e_tag);
         }
 
         Ok(())
@@ -111,24 +126,24 @@ impl Upload {
         if self.data.is_empty() {
             return Ok(());
         }
-        let part_num = (self.parts.len() + 1) as i32;
+        let part_num = (self.info.parts.len() + 1) as i32;
         eprintln!(
             "uploading final {} bytes to {} (part {})",
-            self.size_per_upload, self.key, part_num
+            self.info.size_per_upload, self.info.key, part_num
         );
         let part_upload = self
             .client
             .upload_part()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .upload_id(&self.upload_id)
+            .bucket(&self.info.bucket)
+            .key(&self.info.key)
+            .upload_id(&self.info.upload_id)
             .part_number(part_num)
             .body(self.data.clone().freeze().into())
             .send()
             .await?;
 
         let e_tag = part_upload.e_tag.unwrap();
-        self.parts.push(e_tag);
+        self.info.parts.push(e_tag);
 
         Ok(())
     }
@@ -137,10 +152,14 @@ impl Upload {
         self.send_final().await?;
         let Self {
             client,
-            bucket,
-            key,
-            upload_id,
-            parts,
+            info:
+                UploadInfo {
+                    bucket,
+                    key,
+                    upload_id,
+                    parts,
+                    ..
+                },
             ..
         } = self;
 
