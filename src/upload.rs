@@ -34,6 +34,31 @@ impl Upload {
         client: Arc<Client>,
         bucket: String,
         key: String,
+    ) -> Result<Upload, aws_sdk_s3::Error> {
+        const SIZE_PER_UPLOAD: usize = 512 << 20;
+        let upload = client
+            .create_multipart_upload()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await?;
+        let upload = Upload {
+            client: client.clone(),
+            bucket,
+            key,
+            data: BytesMut::new(),
+            upload_id: upload.upload_id.unwrap(),
+            parts: Vec::new(),
+            size_per_upload: SIZE_PER_UPLOAD,
+        };
+
+        Ok(upload)
+    }
+
+    async fn new_with_size(
+        client: Arc<Client>,
+        bucket: String,
+        key: String,
         size_per_upload: usize,
     ) -> Result<Upload, aws_sdk_s3::Error> {
         let upload = client
@@ -57,7 +82,7 @@ impl Upload {
 
     async fn send(&mut self, data: Bytes) -> Result<(), aws_sdk_s3::Error> {
         self.data.extend(data);
-        if self.data.len() >= self.size_per_upload {
+        while self.data.len() >= self.size_per_upload {
             let part_num = (self.parts.len() + 1) as i32;
             eprintln!(
                 "uploading {} bytes to {} (part {})",
