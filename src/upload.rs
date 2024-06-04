@@ -30,7 +30,7 @@ pub struct UploadInfo {
 }
 
 impl Upload {
-    async fn new(
+    pub async fn new(
         client: Arc<Client>,
         bucket: String,
         key: String,
@@ -55,7 +55,7 @@ impl Upload {
         Ok(upload)
     }
 
-    async fn new_with_size(
+    pub async fn new_with_size(
         client: Arc<Client>,
         bucket: String,
         key: String,
@@ -80,7 +80,7 @@ impl Upload {
         Ok(upload)
     }
 
-    async fn send(&mut self, data: Bytes) -> Result<(), aws_sdk_s3::Error> {
+    pub async fn send(&mut self, data: Bytes) -> Result<(), aws_sdk_s3::Error> {
         self.data.extend(data);
         while self.data.len() >= self.size_per_upload {
             let part_num = (self.parts.len() + 1) as i32;
