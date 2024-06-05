@@ -22,11 +22,11 @@ pub struct UploadInfo {
 
     upload_id: String,
     parts: Vec<String>,
-    uploaded_bytes: usize,
+    pub uploaded_bytes: usize,
 }
 
 impl Upload {
-    pub async fn upload_from_info(
+    pub async fn new_from_info(
         client: Arc<Client>,
         info: UploadInfo,
     ) -> Result<Upload, aws_sdk_s3::Error> {
@@ -104,6 +104,7 @@ impl Upload {
                 self.info.size_per_upload, self.info.key, part_num
             );
             let to_send = self.data.split_to(self.info.size_per_upload);
+            let bytes_sent = to_send.len();
             let part_upload = self
                 .client
                 .upload_part()
@@ -116,6 +117,8 @@ impl Upload {
                 .await?;
 
             let e_tag = part_upload.e_tag.unwrap();
+
+            self.info.uploaded_bytes += bytes_sent;
             self.info.parts.push(e_tag);
         }
 
