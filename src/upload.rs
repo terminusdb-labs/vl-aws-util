@@ -95,7 +95,8 @@ impl Upload {
         Ok(upload)
     }
 
-    pub async fn send(&mut self, data: Bytes) -> Result<(), aws_sdk_s3::Error> {
+    pub async fn send(&mut self, data: Bytes) -> Result<bool, aws_sdk_s3::Error> {
+        let mut something_happened = false;
         self.data.extend(data);
         while self.data.len() >= self.info.size_per_upload {
             let part_num = (self.info.parts.len() + 1) as i32;
@@ -120,9 +121,10 @@ impl Upload {
 
             self.info.uploaded_bytes += bytes_sent;
             self.info.parts.push(e_tag);
+            something_happened = true;
         }
 
-        Ok(())
+        Ok(something_happened)
     }
 
     async fn send_final(&mut self) -> Result<(), aws_sdk_s3::Error> {
