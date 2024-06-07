@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
 use aws_sdk_s3::{
+    error::SdkError,
+    operation::{
+        complete_multipart_upload::CompleteMultipartUploadError,
+        create_multipart_upload::CreateMultipartUploadError, upload_part::UploadPartError,
+    },
     types::{CompletedMultipartUpload, CompletedPart},
     Client,
 };
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::Mutex;
 
 pub struct Upload {
@@ -25,25 +31,30 @@ pub struct UploadInfo {
     pub uploaded_bytes: usize,
 }
 
+#[derive(Debug, Error)]
+pub enum UploadCompleteError {
+    #[error("final part upload failed: {0}")]
+    FinalPartFailed(SdkError<UploadPartError>),
+    #[error("complete multipart upload failed: {0}")]
+    CompletionFailed(SdkError<CompleteMultipartUploadError>),
+}
+
 impl Upload {
-    pub async fn new_from_info(
-        client: Arc<Client>,
-        info: UploadInfo,
-    ) -> Result<Upload, aws_sdk_s3::Error> {
+    pub fn new_from_info(client: Arc<Client>, info: UploadInfo) -> Upload {
         let upload = Upload {
             client: client.clone(),
             data: BytesMut::new(),
             info,
         };
 
-        Ok(upload)
+        upload
     }
 
     pub async fn new(
         client: Arc<Client>,
         bucket: String,
         key: String,
-    ) -> Result<Upload, aws_sdk_s3::Error> {
+    ) -> Result<Upload, SdkError<CreateMultipartUploadError>> {
         const SIZE_PER_UPLOAD: usize = 512 << 20;
         let upload = client
             .create_multipart_upload()
@@ -72,7 +83,7 @@ impl Upload {
         bucket: String,
         key: String,
         size_per_upload: usize,
-    ) -> Result<Upload, aws_sdk_s3::Error> {
+    ) -> Result<Upload, SdkError<CreateMultipartUploadError>> {
         let upload = client
             .create_multipart_upload()
             .bucket(&bucket)
@@ -95,7 +106,7 @@ impl Upload {
         Ok(upload)
     }
 
-    pub async fn send(&mut self, data: Bytes) -> Result<bool, aws_sdk_s3::Error> {
+    pub async fn send(&mut self, data: Bytes) -> Result<bool, SdkError<UploadPartError>> {
         let mut something_happened = false;
         self.data.extend(data);
         while self.data.len() >= self.info.size_per_upload {
@@ -127,7 +138,7 @@ impl Upload {
         Ok(something_happened)
     }
 
-    async fn send_final(&mut self) -> Result<(), aws_sdk_s3::Error> {
+    async fn send_final(&mut self) -> Result<(), SdkError<UploadPartError>> {
         if self.data.is_empty() {
             return Ok(());
         }
@@ -153,8 +164,10 @@ impl Upload {
         Ok(())
     }
 
-    pub async fn complete(mut self) -> Result<(), aws_sdk_s3::Error> {
-        self.send_final().await?;
+    pub async fn complete(mut self) -> Result<(), UploadCompleteError> {
+        self.send_final()
+            .await
+            .map_err(UploadCompleteError::FinalPartFailed)?;
         let Self {
             client,
             info:
@@ -190,7 +203,8 @@ impl Upload {
                     .build(),
             )
             .send()
-            .await?;
+            .await
+            .map_err(UploadCompleteError::CompletionFailed)?;
 
         Ok(())
     }
@@ -247,7 +261,7 @@ impl Uploads {
         Ok(())
     }
 
-    pub async fn complete(self) -> Result<(), aws_sdk_s3::Error> {
+    pub async fn complete(self) -> Result<(), UploadCompleteError> {
         for lock in self.uploads {
             let upload = lock.into_inner();
             upload.complete().await?;
