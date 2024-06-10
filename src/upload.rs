@@ -12,12 +12,18 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinHandle};
+
+struct UploadResult {
+    bytes_sent: usize,
+    e_tag: String,
+}
 
 pub struct Upload {
     client: Arc<Client>,
     pub info: UploadInfo,
     data: BytesMut,
+    upload_task: Option<JoinHandle<Result<UploadResult, SdkError<UploadPartError>>>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,13 +47,12 @@ pub enum UploadCompleteError {
 
 impl Upload {
     pub fn new_from_info(client: Arc<Client>, info: UploadInfo) -> Upload {
-        let upload = Upload {
+        Self {
             client: client.clone(),
             data: BytesMut::new(),
             info,
-        };
-
-        upload
+            upload_task: None,
+        }
     }
 
     pub async fn new(
@@ -73,6 +78,7 @@ impl Upload {
                 size_per_upload: SIZE_PER_UPLOAD,
                 uploaded_bytes: 0,
             },
+            upload_task: None,
         };
 
         Ok(upload)
@@ -101,44 +107,76 @@ impl Upload {
                 size_per_upload,
                 uploaded_bytes: 0,
             },
+            upload_task: None,
         };
 
         Ok(upload)
     }
 
-    pub async fn send(&mut self, data: Bytes) -> Result<bool, SdkError<UploadPartError>> {
-        let mut something_happened = false;
-        self.data.extend(data);
-        while self.data.len() >= self.info.size_per_upload {
-            let part_num = (self.info.parts.len() + 1) as i32;
-            eprintln!(
-                "uploading {} bytes to {} (part {})",
-                self.info.size_per_upload, self.info.key, part_num
-            );
-            let to_send = self.data.split_to(self.info.size_per_upload);
-            let bytes_sent = to_send.len();
-            let part_upload = self
-                .client
+    async fn start_part_upload(&mut self) -> Result<(), SdkError<UploadPartError>> {
+        assert!(self.data.len() >= self.info.size_per_upload);
+        let to_send = self.data.split_to(self.info.size_per_upload).freeze();
+        let part_num = (self.info.parts.len() + 1) as i32;
+        eprintln!(
+            "uploading {} bytes to {} (part {})",
+            self.info.size_per_upload, self.info.key, part_num
+        );
+        let bytes_sent = to_send.len();
+        let bucket = self.info.bucket.clone();
+        let key = self.info.key.clone();
+        let upload_id = self.info.upload_id.clone();
+        let client = self.client.clone();
+        self.upload_task = Some(tokio::spawn(async move {
+            let part_upload = client
                 .upload_part()
-                .bucket(&self.info.bucket)
-                .key(&self.info.key)
-                .upload_id(&self.info.upload_id)
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
                 .part_number(part_num)
-                .body(to_send.freeze().into())
+                .body(to_send.into())
                 .send()
                 .await?;
 
-            let e_tag = part_upload.e_tag.unwrap();
+            Ok(UploadResult {
+                bytes_sent,
+                e_tag: part_upload.e_tag.unwrap(),
+            })
+        }));
+
+        Ok(())
+    }
+
+    async fn finish_part_upload(&mut self) -> Result<bool, SdkError<UploadPartError>> {
+        let mut upload_task = None;
+        std::mem::swap(&mut upload_task, &mut self.upload_task);
+        if let Some(upload_task) = upload_task {
+            let UploadResult { bytes_sent, e_tag } =
+                upload_task.await.expect("join failed on upload task")?;
 
             self.info.uploaded_bytes += bytes_sent;
             self.info.parts.push(e_tag);
-            something_happened = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn send(&mut self, data: Bytes) -> Result<bool, SdkError<UploadPartError>> {
+        let mut something_happened = false;
+        self.data.extend(data);
+        if self.upload_task.is_some() && self.upload_task.as_ref().unwrap().is_finished() {
+            something_happened = self.finish_part_upload().await?;
+        }
+        while self.data.len() >= self.info.size_per_upload {
+            something_happened = something_happened || self.finish_part_upload().await?;
+            self.start_part_upload().await?;
         }
 
         Ok(something_happened)
     }
 
     async fn send_final(&mut self) -> Result<(), SdkError<UploadPartError>> {
+        self.finish_part_upload().await?;
         if self.data.is_empty() {
             return Ok(());
         }
