@@ -12,3 +12,6 @@ async-trait = "0.1.80"
 thiserror = "1.0.61"
 serde = { version = "1.0.203", features = ["derive"] }
 vectorlink-task = {git = "https://github.com/terminusdb-hub/vectorlink", branch="dev"}
+futures = "0.3.30"
+async-stream = "0.3.5"
+tokio-stream = "0.1.15"
